@@ -1,106 +1,25 @@
 pragma solidity ^0.4.24;
-
-//==============================================================================
-//     _    _  _ _|_ _  .
-//    (/_\/(/_| | | _\  .
-//==============================================================================
-contract Devents {
-    // fired whenever a player registers a name
-    event onNewName
-    (
-        address indexed playerAddress,
-        string playerName,
-        bool isNewPlayer,
-        address affiliateAddress,
-        uint256 amountPaid,
-        uint256 timeStamp
-    );
-
-    // fired at end of buy or reload
-    event onEndTx
-    (
-        string playerName,
-        address playerAddress,
-        uint256 ethIn,
-        uint256 keysBought,
-        uint256 potAmount
-    );
-
-    // fired whenever theres a withdraw
-    event onWithdraw
-    (
-        address playerAddress,
-        string playerName,
-        uint256 ethOut,
-        uint256 timeStamp
-    );
-
-    // fired whenever a withdraw forces end round to be ran
-    event onWithdrawAndDistribute
-    (
-        address playerAddress,
-        string playerName,
-        uint256 ethOut
-    );
-
-    // (fomo3d long only) fired whenever a player tries a buy after round timer
-    // hit zero, and causes end round to be ran.
-    event onBuyAndDistribute
-    (
-        address playerAddress,
-        bytes32 playerName,
-        uint256 ethIn,
-        uint256 compressedData,
-        uint256 compressedIDs,
-        address winnerAddr,
-        bytes32 winnerName,
-        uint256 amountWon,
-        uint256 newPot,
-        uint256 P3DAmount,
-        uint256 genAmount
-    );
-
-    // (fomo3d long only) fired whenever a player tries a reload after round timer
-    // hit zero, and causes end round to be ran.
-    event onReLoadEnd
-    (
-        address playerAddress,
-        string playerName,
-        uint256 amountWon,
-        uint256 pot
-    );
-
-    // fired whenever an affiliate is paid
-    event onAffiliatePayout
-    (
-        address affiliateAddress,
-        string affiliateName,
-        uint256 amount,
-        uint256 timeStamp
-    );
-
-}
+pragma experimental ABIEncoderV2;
 
 //==============================================================================
 //   _ _  _ _|_ _ _  __|_   _ _ _|_    _   .
 //  (_(_)| | | | (_|(_ |   _\(/_ | |_||_)  .
 //====================================|=========================================
 
-contract modularLong is Devents {}
+import "./library/SafeMath.sol";
+import "./library/NameFilter.sol";
+import "./library/DkeysCalc.sol";
+import "./library/Ddatasets.sol";
+import "./Devents.sol";
 
-contract Decentralism is modularLong {
+contract Decentralism is Devents {
     using SafeMath for *;
     using NameFilter for string;
     using DKeysCalc for uint256;
-    struct WinnerGroup {
-        uint256 price;
-        string id;
-        address[] addr;
-    }
 
     // for Decentralism
     uint256 constant delay_ = 120 seconds;
-    uint256 public startTime_;
+    uint256 public startTime_ = now;
     uint256 public initEth_ = 1000000;
     bool private start_ = false;
     bool private end_ = false;
@@ -111,18 +30,14 @@ contract Decentralism is modularLong {
     uint256 eth_ = 0;
     uint256 com_ = 0;
     address private win_;
-    uint256 private totalBalance_;
+    uint256 private totalBalance_ = 0;
+    address owner;
 
-    address[] public addressIndexes;
+    Ddatasets.PurchaseRecord[] purchaseRecord_;
 
     mapping (address => Ddatasets.Player) public plyrs_;   // (pID => data) player data
     mapping (string => address) referMap_;
     mapping (address => bool) public winner_;
-
-    WinnerGroup winnerGroup1_;
-    WinnerGroup winnerGroup2_;
-    WinnerGroup winnerGroup3_;
-    address[] _result;
 
     //==============================================================================
     //     _ _  _  __|_ _    __|_ _  _  .
@@ -132,7 +47,13 @@ contract Decentralism is modularLong {
     public
     {
         startTime_ = now;
+        start_ = true;
+        owner = msg.sender;
+    }
 
+    function destroyContract() public {
+        require(owner == msg.sender);
+        selfdestruct(owner);
     }
     //==============================================================================
     //     _ _  _  _|. |`. _  _ _  .
@@ -209,7 +130,12 @@ contract Decentralism is modularLong {
         // fetch player address
         address _addr = msg.sender;
         address _aff = referMap_[_affCode];
-        plyrs_[_addr].est.push(_est);
+        Ddatasets.PurchaseRecord storage _pr;
+        // TODO
+        _pr.addr = _addr;
+        _pr.est = _est.mul(1000000000000000000);
+        _pr.time = now;
+        purchaseRecord_.push(_pr);
 
         // manage affiliate residuals
         // if no affiliate code was given or player tried to use their own, lolz
@@ -223,6 +149,7 @@ contract Decentralism is modularLong {
             // update last affiliate
             plyrs_[msg.sender].laff = _aff;
         }
+        plyrs_[msg.sender].records.push(_pr);
 
         // buy core
         buyCoreNew(_addr, _aff, msg.value, _eventData_);
@@ -251,7 +178,12 @@ contract Decentralism is modularLong {
         // fetch player id
         address _addr = msg.sender;
         address _aff = referMap_[_affCode];
-        plyrs_[_addr].est.push(_est);
+        Ddatasets.PurchaseRecord storage _pr;
+        // TODO
+        _pr.addr = _addr;
+        _pr.est = _est.mul(1000000000000000000);
+        _pr.time = now;
+        purchaseRecord_.push(_pr);
 
         // manage affiliate residuals
         // if no affiliate code was given or player tried to use their own, lolz
@@ -265,6 +197,7 @@ contract Decentralism is modularLong {
             // update last affiliate
             plyrs_[msg.sender].laff = _aff;
         }
+        plyrs_[msg.sender].records.push(_pr);
 
         // reload core
         reLoadCoreNew(_addr, _aff, msg.value, _eventData_);
@@ -411,19 +344,33 @@ contract Decentralism is modularLong {
     returns(uint256)
     {
 
-        // grab time
-        uint256 _now = now;
 
-        uint256 _ethDec = calculateEndEth(_now);
+        uint256 _ethDec = calculateEndEth(now);
         uint256 _ethInc = totalBalance_;
 
         // are we in a round?
-        if (_ethDec > _ethInc)
+        if (_ethDec > _ethInc) {
             return ( (keys_.add(1000000000000000000)).ethRec(1000000000000000000) );
-        else {
+        } else {
             // rounds over.  need price for new round
             return ( 75000000000000 ); // init
         }
+    }
+
+    function getEndEth()
+    public
+    view
+    returns(uint256)
+    {
+      return calculateEndEth(now);
+    }
+
+    function getTotalBalance()
+    public
+    view
+    returns(uint256)
+    {
+      return totalBalance_;
     }
 
 
@@ -446,12 +393,6 @@ contract Decentralism is modularLong {
         // if round has ended.  but round end has not been run (so contract has not distributed winnings)
         if (_ethDec < _ethInc)
         {
-//            if (end_ == false) {
-//                Ddatasets.EventReturns memory _eventData_;
-//                endRound(_eventData_);
-//                end_ = true;
-//                // TODO: calculate
-//            }
 
             // if player is winner
             if (winner_[_addr] == true)
@@ -511,23 +452,33 @@ contract Decentralism is modularLong {
     function getPlayerInfoByAddress(address _addr)
     public
     view
-    returns(string, uint256, uint256, uint256, uint256, uint256)
+    returns(string, uint256, uint256, uint256, uint256, uint256, Ddatasets.PurchaseRecord[])
     {
 
         if (_addr == address(0))
         {
             _addr == msg.sender;
         }
-
+        // Ddatasets.PurchaseRecord memory record = getLatestPurchaseRecord(msg.sender);
         return
         (
-        plyrs_[_addr].name,                   //1
-        plyrs_[_addr].keys,         //2
-        plyrs_[_addr].win,                    //3
-        (plyrs_[_addr].gen).add(calcUnMaskedEarningsXAddr(_addr)),       //4
-        plyrs_[_addr].aff,                //5
-        plyrs_[_addr].eth
+          plyrs_[_addr].name,                   //1
+          plyrs_[_addr].keys,         //2
+          plyrs_[_addr].win,                    //3
+          (plyrs_[_addr].gen).add(calcUnMaskedEarningsXAddr(_addr)),       //4
+          plyrs_[_addr].aff,                //5
+          plyrs_[_addr].eth,
+          plyrs_[_addr].records
         );
+    }
+
+    function getLatestPurchaseRecord(address _addr)
+    private
+    view
+    returns(Ddatasets.PurchaseRecord)
+    {
+        uint256 length = plyrs_[_addr].records.length;
+        return (plyrs_[_addr].records[length - 1]);
     }
 
     //==============================================================================
@@ -748,181 +699,85 @@ contract Decentralism is modularLong {
         return (((initEth_).mul(1000000000000000000)).mul((T).add(1)))/(((T).add(D)).add(1));
     }
 
-    // Get at lease three winners
-    // So there might be more than three winners
-    function getWinner() internal returns(address[]) {
-        uint initiCount_ = 0;
-        for(uint256 i = 0; i < addressIndexes.length; i++) {
-            uint256 priceDiff_;
-            address playerAddr_ = addressIndexes[i];
-            Ddatasets.Player memory player_ = plyrs_[playerAddr_];
-
-            for(uint j=0;j<player_.est.length;j++){
-
-                if(totalBalance_ > player_.est[j]){
-                    priceDiff_ = totalBalance_ - player_.est[j];
-                }else{
-                    priceDiff_ = player_.est[j] - totalBalance_;
-                }
-
-                if (initiCount_==0) {
-                    winnerGroup3_.addr.push(player_.addr);
-                    winnerGroup3_.price = priceDiff_;
-                    initiCount_++;
-                }else if (initiCount_==1) {
-                    initiCount_++;
-                    if(priceDiff_==winnerGroup3_.price){
-                        winnerGroup3_.addr.push(player_.addr);
-                    }else if(priceDiff_>winnerGroup3_.price){
-                        //                        Ddatasets.WinnerGroup tempGroup_;
-                        //                        tempGroup_.addr.push(player_.addr);
-                        //                        tempGroup_.price = priceDiff_;
-                        // not sure about object copy
-                        winnerGroup2_.addr = winnerGroup3_.addr;
-                        winnerGroup2_.price = winnerGroup3_.price;
-                        winnerGroup3_.addr.length = 0;
-                        winnerGroup3_.addr.push(player_.addr);
-                        winnerGroup3_.price = priceDiff_;
-                    }else{
-                        winnerGroup2_.addr.push(player_.addr);
-                        winnerGroup2_.price = priceDiff_;
-                    }
-                } else if (initiCount_==2) {
-                    initiCount_++;
-                    if(priceDiff_==winnerGroup3_.price){
-                        winnerGroup3_.addr.push(player_.addr);
-                    }else if(priceDiff_>winnerGroup3_.price){
-                        //                        Ddatasets.WinnerGroup tempGroup_;
-                        //                        tempGroup_.addr.push(player_.addr);
-                        //                        tempGroup_.price = priceDiff_;
-                        winnerGroup2_.addr = winnerGroup3_.addr;
-                        winnerGroup2_.price = winnerGroup3_.price;
-                        winnerGroup3_.addr.length = 0;
-                        winnerGroup3_.addr.push(player_.addr);
-                        winnerGroup3_.price = priceDiff_;
-                    }else if(priceDiff_<winnerGroup3_.price && priceDiff_>winnerGroup2_.price){
-                        //                        Ddatasets.WinnerGroup tempGroup_;
-                        //                        tempGroup_.addr.push(player_.addr);
-                        //                        tempGroup_.price = priceDiff_;
-                        winnerGroup1_.addr = winnerGroup2_.addr;
-                        winnerGroup1_.price = winnerGroup2_.price;
-                        winnerGroup2_.addr.length = 0;
-                        winnerGroup2_.addr.push(player_.addr);
-                        winnerGroup2_.price = priceDiff_;
-                    }else if(priceDiff_==winnerGroup2_.price){
-                        winnerGroup2_.addr.push(player_.addr);
-                    }else{
-                        winnerGroup1_.addr.push(player_.addr);
-                        winnerGroup1_.price = priceDiff_;
-                    }
-                } else {
-                    if(priceDiff_==winnerGroup3_.price){
-                        winnerGroup3_.addr.push(player_.addr);
-                    }else if(priceDiff_<winnerGroup3_.price && priceDiff_>winnerGroup2_.price){
-                        winnerGroup3_.addr.length = 0;
-                        winnerGroup3_.addr.push(player_.addr);
-                        winnerGroup3_.price = priceDiff_;
-                    }else if(priceDiff_==winnerGroup2_.price){
-                        winnerGroup2_.addr.push(player_.addr);
-                    }else if(priceDiff_<winnerGroup2_.price && priceDiff_>winnerGroup1_.price){
-                        winnerGroup3_.addr = winnerGroup2_.addr;
-                        winnerGroup3_.price = winnerGroup2_.price;
-                        winnerGroup2_.addr.length = 0;
-                        winnerGroup2_.addr.push(player_.addr);
-                        winnerGroup2_.price = priceDiff_;
-                    }else if(priceDiff_==winnerGroup1_.price){
-                        winnerGroup1_.addr.push(player_.addr);
-                    }else{
-                        winnerGroup3_.addr = winnerGroup2_.addr;
-                        winnerGroup3_.price = winnerGroup2_.price;
-                        winnerGroup2_.addr = winnerGroup1_.addr;
-                        winnerGroup2_.price = winnerGroup1_.price;
-                        winnerGroup1_.addr.length = 0;
-                        winnerGroup1_.addr.push(player_.addr);
-                        winnerGroup1_.price = priceDiff_;
-                    }
-                }
-            }
+    function getThreeWinner() private returns(address, address, address) {
+      // Estimate difference
+      uint256 pd1_;
+      uint256 pd2_;
+      uint256 pd3_;
+      Ddatasets.PurchaseRecord memory pr1_;
+      Ddatasets.PurchaseRecord memory pr2_;
+      Ddatasets.PurchaseRecord memory pr3_;
+      for(uint i = 0; i < purchaseRecord_.length ; i++) {
+        // temporary price difference
+        uint256 tmpPd = getPriceDiff(purchaseRecord_[i].est);
+        if (i == 0) {
+          pd1_ = tmpPd;
+          pr1_ = purchaseRecord_[i];
+        } else if (i == 1) {
+          if (tmpPd >= pd1_) {
+            pd2_ = tmpPd;
+            pr2_ = purchaseRecord_[i];
+          } else {
+            pd2_ = pd1_;
+            pr2_ = pr1_;
+            pd1_ = tmpPd;
+            pr1_ = purchaseRecord_[i];
+          }
+        } else if (i == 2) {
+          if (tmpPd <= pd1_) {
+            pd3_ = pd2_;
+            pr3_ = pr2_;
+            pd2_ = pd1_;
+            pr2_ = pr1_;
+            pd1_ = tmpPd;
+            pr1_ = purchaseRecord_[i];
+          } else if (tmpPd <= pd2_) {
+            pd3_ = pd2_;
+            pr3_ = pr2_;
+            pd2_ = tmpPd;
+            pr2_ = purchaseRecord_[i];
+          } else {
+            pd3_ = tmpPd;
+            pr3_ = purchaseRecord_[i];
+          }
+        } else {
+          if (tmpPd < pr1_.est) {
+            pd3_ = pd2_;
+            pr3_ = pr2_;
+            pd2_ = pd1_;
+            pr2_ = pr1_;
+            pd1_ = tmpPd;
+            pr1_ = purchaseRecord_[i];
+          } else if (tmpPd < pr2_.est) {
+            pd3_ = pd2_;
+            pr3_ = pr2_;
+            pd2_ = tmpPd;
+            pr2_ = purchaseRecord_[i];
+          } else if (tmpPd < pr3_.est) {
+            pd3_ = tmpPd;
+            pr3_ = purchaseRecord_[i];
+          }
         }
+      }
+      return(pr1_.addr, pr2_.addr, pr3_.addr);
+    }
 
-        return (selectAddress());
-
+    function getPriceDiff(uint256 price) view returns (uint256) {
+      uint256 _pd = 0;
+      if(totalBalance_ > price){
+          _pd = totalBalance_.sub(price);
+      }else{
+          _pd = price.sub(totalBalance_);
+      }
+      return _pd;
     }
 
     // evenly giving the money to winners
-    function distributePotToWinner(address[] _winners, uint256 _eth) public{
-        uint256 _amount = _eth / _winners.length;
-        for(uint256 i = 0; i < _winners.length; i++){
-            winner_[_winners[i]] = true;
-            plyrs_[_winners[i]].win += _amount;
-        }
-    }
-
-    // select all address from winner group
-    // there might be three winners
-    function selectAddress()
-    public
-    returns(address[])
-    {
-
-        if(winnerGroup3_.addr.length == 0) { // nobody played
-            return _result;
-        } else if(winnerGroup2_.addr.length == 0) { // G2 has nothing means only has one group winner, will happen in a scenario that only a price is in place and all players place this price
-
-            for(uint256 i = 0; i < winnerGroup3_.addr.length; i++) {
-
-                _result.push(winnerGroup3_.addr[i]);
-            }
-
-            return _result;
-
-        } else if(winnerGroup1_.addr.length == 0) {
-
-            for(i = 0; i < winnerGroup2_.addr.length; i++) {
-
-                _result.push(winnerGroup2_.addr[i]);
-            }
-
-            if(_result.length > 3) {
-                return _result;
-            }
-
-            for(i = 0; i < winnerGroup3_.addr.length; i++) {
-
-                _result.push(winnerGroup3_.addr[i]);
-            }
-
-            return _result;
-        }
-
-
-        for(i = 0; i < winnerGroup1_.addr.length; i++) {
-
-            _result.push(winnerGroup1_.addr[i]);
-        }
-
-        // After pushing winner group1, if there are more than 3 candidates already, quit
-        if(_result.length > 3) {
-            return _result;
-        }
-
-        for(i = 0; i < winnerGroup2_.addr.length; i++) {
-
-            _result.push(winnerGroup2_.addr[i]);
-        }
-
-        // DITTO
-        if(_result.length > 3) {
-            return _result;
-        }
-
-        for(i = 0; i < winnerGroup3_.addr.length; i++) {
-
-            _result.push(winnerGroup3_.addr[i]);
-        }
-
-
-        return _result;
+    function distributePotToWinner(address addr1, address addr2, address addr3, uint256 _eth) public{
+        uint256 _amount = _eth / 3;
+        plyrs_[addr1].win = plyrs_[addr1].win.add(_amount);
+        plyrs_[addr2].win = plyrs_[addr2].win.add(_amount);
+        plyrs_[addr3].win = plyrs_[addr3].win.add(_amount);
     }
 
     //==============================================================================
@@ -938,7 +793,10 @@ contract Decentralism is modularLong {
     returns (Ddatasets.EventReturns)
     {
         // get winners first
-        address[] memory winners = getWinner();
+        (address addr1, address addr2, address addr3) = getThreeWinner();
+        winner_[addr1] = true;
+        winner_[addr2] = true;
+        winner_[addr3] = true;
 
         // grab our pot amount
         uint256 _pot = pot_;
@@ -950,7 +808,7 @@ contract Decentralism is modularLong {
         // TODO: how to design the community in this contract
         com_ = (_pot.mul(10)) / 100;
 
-        distributePotToWinner(winners, _win);
+        distributePotToWinner(addr1, addr2, addr3, _win);
         _eventData_.potAmount = pot_;
 
         return(_eventData_);
@@ -1181,313 +1039,3 @@ contract Decentralism is modularLong {
     }
 
 }
-
-//==============================================================================
-//   __|_ _    __|_ _  .
-//  _\ | | |_|(_ | _\  .
-//==============================================================================
-library Ddatasets {
-    //compressedData key
-    // [76-33][32][31][30][29][28-18][17][16-6][5-3][2][1][0]
-    // 0 - new player (bool)
-    // 1 - joined round (bool)
-    // 2 - new  leader (bool)
-    // 3-5 - air drop tracker (uint 0-999)
-    // 6-16 - round end time
-    // 17 - winnerTeam
-    // 18 - 28 timestamp
-    // 29 - team
-    // 30 - 0 = reinvest (round), 1 = buy (round), 2 = buy (ico), 3 = reinvest (ico)
-    // 31 - airdrop happened bool
-    // 32 - airdrop tier
-    // 33 - airdrop amount won
-    //compressedIDs key
-    // [77-52][51-26][25-0]
-    // 0-25 - pID
-    // 26-51 - winPID
-    // 52-77 - rID
-    struct EventReturns {
-        uint256 compressedData;
-        uint256 compressedIDs;
-        uint256 potAmount;          // amount added to pot
-    }
-    struct Player {
-        address addr;   // player address
-        string name;      // player name
-        uint256 win;    // winnings vault
-        uint256 gen;    // general vault
-        uint256 aff;    // affiliate vault
-        address laff;   // last affiliate id that refer this player
-        uint256 mask;
-        uint256 keys;
-        uint256[] est;
-        uint256 eth;
-        string referCode; // player's refer code that sent to other players
-    }
-
-}
-
-//==============================================================================
-//  |  _      _ _ | _  .
-//  |<(/_\/  (_(_||(_  .
-//=======/======================================================================
-library DKeysCalc {
-    using SafeMath for *;
-    /**
-     * @dev calculates number of keys received given X eth
-     * @param _curEth current amount of eth in contract
-     * @param _newEth eth being spent
-     * @return amount of ticket purchased
-     */
-    function keysRec(uint256 _curEth, uint256 _newEth)
-    internal
-    pure
-    returns (uint256)
-    {
-        return(keys((_curEth).add(_newEth)).sub(keys(_curEth)));
-    }
-
-    /**
-     * @dev calculates amount of eth received if you sold X keys
-     * @param _curKeys current amount of keys that exist
-     * @param _sellKeys amount of keys you wish to sell
-     * @return amount of eth received
-     */
-    function ethRec(uint256 _curKeys, uint256 _sellKeys)
-    internal
-    pure
-    returns (uint256)
-    {
-        return((eth(_curKeys)).sub(eth(_curKeys.sub(_sellKeys))));
-    }
-
-    /**
-     * @dev calculates how many keys would exist with given an amount of eth
-     * @param _eth eth "in contract"
-     * @return number of keys that would exist
-     */
-    function keys(uint256 _eth)
-    internal
-    pure
-    returns(uint256)
-    {
-        return ((((((_eth).mul(1000000000000000000)).mul(312500000000000000000000000)).add(5624988281256103515625000000000000000000000000000000000000000000)).sqrt()).sub(74999921875000000000000000000000)) / (156250000);
-    }
-
-    /**
-     * @dev calculates how much eth would be in contract given a number of keys
-     * @param _keys number of keys "in contract"
-     * @return eth that would exists
-     */
-    function eth(uint256 _keys)
-    internal
-    pure
-    returns(uint256)
-    {
-        return ((78125000).mul(_keys.sq()).add(((149999843750000).mul(_keys.mul(1000000000000000000))) / (2))) / ((1000000000000000000).sq());
-    }
-}
-
-/**
-* @title -Name Filter- v0.1.9
-* ┌┬┐┌─┐┌─┐┌┬┐   ╦╦ ╦╔═╗╔╦╗  ┌─┐┬─┐┌─┐┌─┐┌─┐┌┐┌┌┬┐┌─┐
-*  │ ├┤ ├─┤│││   ║║ ║╚═╗ ║   ├─┘├┬┘├┤ └─┐├┤ │││ │ └─┐
-*  ┴ └─┘┴ ┴┴ ┴  ╚╝╚═╝╚═╝ ╩   ┴  ┴└─└─┘└─┘└─┘┘└┘ ┴ └─┘
-*                                  _____                      _____
-*                                 (, /     /)       /) /)    (, /      /)          /)
-*          ┌─┐                      /   _ (/_      // //       /  _   // _   __  _(/
-*          ├─┤                  ___/___(/_/(__(_/_(/_(/_   ___/__/_)_(/_(_(_/ (_(_(_
-*          ┴ ┴                /   /          .-/ _____   (__ /
-*                            (__ /          (_/ (, /                                      /)™
-*                                                 /  __  __ __ __  _   __ __  _  _/_ _  _(/
-* ┌─┐┬─┐┌─┐┌┬┐┬ ┬┌─┐┌┬┐                          /__/ (_(__(_)/ (_/_)_(_)/ (_(_(_(__(/_(_(_
-* ├─┘├┬┘│ │ │││ ││   │                      (__ /              .-/  © Jekyll Island Inc. 2018
-* ┴  ┴└─└─┘─┴┘└─┘└─┘ ┴                                        (_/
-*              _       __    _      ____      ____  _   _    _____  ____  ___
-*=============| |\ |  / /\  | |\/| | |_ =====| |_  | | | |    | |  | |_  | |_)==============*
-*=============|_| \| /_/--\ |_|  | |_|__=====|_|   |_| |_|__  |_|  |_|__ |_| \==============*
-*
-* ╔═╗┌─┐┌┐┌┌┬┐┬─┐┌─┐┌─┐┌┬┐  ╔═╗┌─┐┌┬┐┌─┐ ┌──────────┐
-* ║  │ ││││ │ ├┬┘├─┤│   │   ║  │ │ ││├┤  │ Inventor │
-* ╚═╝└─┘┘└┘ ┴ ┴└─┴ ┴└─┘ ┴   ╚═╝└─┘─┴┘└─┘ └──────────┘
-*/
-
-library NameFilter {
-    /**
-     * @dev filters name strings
-     * -converts uppercase to lower case.
-     * -makes sure it does not start/end with a space
-     * -makes sure it does not contain multiple spaces in a row
-     * -cannot be only numbers
-     * -cannot start with 0x
-     * -restricts characters to A-Z, a-z, 0-9, and space.
-     * @return reprocessed string in bytes32 format
-     */
-    function nameFilter(string _input)
-    internal
-    pure
-    returns(bytes32)
-    {
-        bytes memory _temp = bytes(_input);
-        uint256 _length = _temp.length;
-
-        //sorry limited to 32 characters
-        require (_length <= 32 && _length > 0, "string must be between 1 and 32 characters");
-        // make sure it doesnt start with or end with space
-        require(_temp[0] != 0x20 && _temp[_length-1] != 0x20, "string cannot start or end with space");
-        // make sure first two characters are not 0x
-        if (_temp[0] == 0x30)
-        {
-            require(_temp[1] != 0x78, "string cannot start with 0x");
-            require(_temp[1] != 0x58, "string cannot start with 0X");
-        }
-
-        // create a bool to track if we have a non number character
-        bool _hasNonNumber;
-
-        // convert & check
-        for (uint256 i = 0; i < _length; i++)
-        {
-            // if its uppercase A-Z
-            if (_temp[i] > 0x40 && _temp[i] < 0x5b)
-            {
-                // convert to lower case a-z
-                _temp[i] = byte(uint(_temp[i]) + 32);
-
-                // we have a non number
-                if (_hasNonNumber == false)
-                    _hasNonNumber = true;
-            } else {
-                require
-                (
-                // require character is a space
-                    _temp[i] == 0x20 ||
-                // OR lowercase a-z
-                (_temp[i] > 0x60 && _temp[i] < 0x7b) ||
-                // or 0-9
-                (_temp[i] > 0x2f && _temp[i] < 0x3a),
-                    "string contains invalid characters"
-                );
-                // make sure theres not 2x spaces in a row
-                if (_temp[i] == 0x20)
-                    require( _temp[i+1] != 0x20, "string cannot contain consecutive spaces");
-
-                // see if we have a character other than a number
-                if (_hasNonNumber == false && (_temp[i] < 0x30 || _temp[i] > 0x39))
-                    _hasNonNumber = true;
-            }
-        }
-
-        require(_hasNonNumber == true, "string cannot be only numbers");
-
-        bytes32 _ret;
-        assembly {
-            _ret := mload(add(_temp, 32))
-        }
-        return (_ret);
-    }
-}
-
-/**
- * @title SafeMath v0.1.9
- * @dev Math operations with safety checks that throw on error
- * change notes:  original SafeMath library from OpenZeppelin modified by Inventor
- * - added sqrt
- * - added sq
- * - added pwr
- * - changed asserts to requires with error log outputs
- * - removed div, its useless
- */
-library SafeMath {
-
-    /**
-    * @dev Multiplies two numbers, throws on overflow.
-    */
-    function mul(uint256 a, uint256 b)
-    internal
-    pure
-    returns (uint256 c)
-    {
-        if (a == 0) {
-            return 0;
-        }
-        c = a * b;
-        require(c / a == b, "SafeMath mul failed");
-        return c;
-    }
-
-    /**
-    * @dev Subtracts two numbers, throws on overflow (i.e. if subtrahend is greater than minuend).
-    */
-    function sub(uint256 a, uint256 b)
-    internal
-    pure
-    returns (uint256)
-    {
-        require(b <= a, "SafeMath sub failed");
-        return a - b;
-    }
-
-    /**
-    * @dev Adds two numbers, throws on overflow.
-    */
-    function add(uint256 a, uint256 b)
-    internal
-    pure
-    returns (uint256 c)
-    {
-        c = a + b;
-        require(c >= a, "SafeMath add failed");
-        return c;
-    }
-
-    /**
-     * @dev gives square root of given x.
-     */
-    function sqrt(uint256 x)
-    internal
-    pure
-    returns (uint256 y)
-    {
-        uint256 z = ((add(x,1)) / 2);
-        y = x;
-        while (z < y)
-        {
-            y = z;
-            z = ((add((x / z),z)) / 2);
-        }
-    }
-
-    /**
-     * @dev gives square. multiplies x by x
-     */
-    function sq(uint256 x)
-    internal
-    pure
-    returns (uint256)
-    {
-        return (mul(x,x));
-    }
-
-    /**
-     * @dev x to the power of y
-     */
-    function pwr(uint256 x, uint256 y)
-    internal
-    pure
-    returns (uint256)
-    {
-        if (x==0)
-            return (0);
-        else if (y==0)
-            return (1);
-        else
-        {
-            uint256 z = x;
-            for (uint256 i=1; i < y; i++)
-                z = mul(z,x);
-            return (z);
-        }
-    }
-}
-
